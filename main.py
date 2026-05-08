@@ -6,23 +6,21 @@ from dateutil.relativedelta import relativedelta
 
 # --- CONFIGURATION ---
 DB_FILE = "docket_db.csv"
-DATE_FORMAT = "%d-%b-%Y"  # Standard: DD-MMM-YYYY
+DATE_FORMAT = "%d-%b-%Y"
 
 def load_data():
     if os.path.exists(DB_FILE):
         df = pd.read_csv(DB_FILE)
-        # Convert strings back to date objects for calculation
         df['Event Date'] = pd.to_datetime(df['Event Date'], format=DATE_FORMAT).dt.date
-        df['Form-3'] = df['Form-3'].apply(lambda x: pd.to_datetime(x, format=DATE_FORMAT).date() if x != "N/A" else "N/A")
         df['Final Deadline'] = pd.to_datetime(df['Final Deadline'], format=DATE_FORMAT).dt.date
         return df
     return pd.DataFrame(columns=["Docket", "Type", "Event Date", "Form-3", "Final Deadline", "Status"])
 
 def save_data(df):
-    # Format dates as strings before saving to CSV
     save_df = df.copy()
     save_df['Event Date'] = save_df['Event Date'].apply(lambda x: x.strftime(DATE_FORMAT))
-    save_df['Form-3'] = save_df['Form-3'].apply(lambda x: x.strftime(DATE_FORMAT) if x != "N/A" else "N/A")
+    # Form-3 can be "N/A" string or a date object
+    save_df['Form-3'] = save_df['Form-3'].apply(lambda x: x.strftime(DATE_FORMAT) if hasattr(x, 'strftime') else x)
     save_df['Final Deadline'] = save_df['Final Deadline'].apply(lambda x: x.strftime(DATE_FORMAT))
     save_df.to_csv(DB_FILE, index=False)
 
@@ -40,64 +38,75 @@ st.title("⚖️ IP Docket & Reminder Dashboard")
 if 'df' not in st.session_state:
     st.session_state.df = load_data()
 
-# --- SIDEBAR: INPUT ---
-with st.sidebar.form("add_entry", clear_on_submit=True):
-    st.header("New Docket Entry")
-    doc_id = st.text_input("Docket Number")
-    n_type = st.selectbox("Type", ["FER", "Hearing"])
-    # Date input UI (still uses standard selector, but we format the result)
-    date_val = st.date_input("Notice/Hearing Date")
-    
-    if st.form_submit_button("Add to System"):
-        if doc_id:
-            f3, final = get_dates(n_type, date_val)
-            new_row = pd.DataFrame([{
-                "Docket": doc_id, "Type": n_type, "Event Date": date_val,
-                "Form-3": f3, "Final Deadline": final, "Status": "Pending"
-            }])
-            st.session_state.df = pd.concat([st.session_state.df, new_row], ignore_index=True)
+# --- SIDEBAR: ACTIONS ---
+st.sidebar.header("Management Center")
+
+# 1. ADD NEW ENTRY
+with st.sidebar.expander("➕ Add New Docket", expanded=False):
+    with st.form("add_form", clear_on_submit=True):
+        doc_id = st.text_input("Docket Number")
+        n_type = st.selectbox("Type", ["FER", "Hearing"])
+        date_val = st.date_input("Notice/Hearing Date")
+        if st.form_submit_button("Add to System"):
+            if doc_id:
+                f3, final = get_dates(n_type, date_val)
+                new_row = pd.DataFrame([{
+                    "Docket": doc_id, "Type": n_type, "Event Date": date_val,
+                    "Form-3": f3, "Final Deadline": final, "Status": "Pending"
+                }])
+                st.session_state.df = pd.concat([st.session_state.df, new_row], ignore_index=True)
+                save_data(st.session_state.df)
+                st.rerun()
+
+# 2. EDIT OR DELETE ENTRY
+if not st.session_state.df.empty:
+    with st.sidebar.expander("📝 Edit / Delete Docket", expanded=True):
+        target_docket = st.selectbox("Select Docket to Modify", st.session_state.df["Docket"].unique())
+        
+        # Get current values for the selected docket
+        idx = st.session_state.df.index[st.session_state.df['Docket'] == target_docket].tolist()[0]
+        current_status = st.session_state.df.at[idx, "Status"]
+        
+        new_status = st.selectbox("Update Status", ["Pending", "Completed", "Abandoned"], 
+                                  index=["Pending", "Completed", "Abandoned"].index(current_status))
+        
+        col1, col2 = st.columns(2)
+        if col1.button("💾 Save Edit"):
+            st.session_state.df.at[idx, "Status"] = new_status
             save_data(st.session_state.df)
-            st.success(f"Added {doc_id}")
+            st.success("Updated!")
+            st.rerun()
+            
+        if col2.button("🗑️ Delete Entry"):
+            st.session_state.df = st.session_state.df.drop(idx).reset_index(drop=True)
+            save_data(st.session_state.df)
+            st.warning("Deleted!")
             st.rerun()
 
-# --- DASHBOARD ---
+# --- MAIN DASHBOARD ---
 df = st.session_state.df.copy()
 if not df.empty:
     today = datetime.now().date()
     df['Days Left'] = df['Final Deadline'].apply(lambda x: (x - today).days)
     
-    # Logic for Alerts
+    # Urgent Alerts
     urgent = df[(df['Days Left'] <= 7) & (df['Status'] == "Pending")]
-    
     if not urgent.empty:
-        # Create a display-friendly version for the alert
-        display_urgent = urgent.copy()
-        display_urgent['Event Date'] = display_urgent['Event Date'].apply(lambda x: x.strftime(DATE_FORMAT))
-        display_urgent['Final Deadline'] = display_urgent['Final Deadline'].apply(lambda x: x.strftime(DATE_FORMAT))
         st.error(f"⚠️ {len(urgent)} Deadlines due within 7 days!")
-        st.table(display_urgent[["Docket", "Type", "Final Deadline", "Days Left"]])
+        st.table(urgent[["Docket", "Final Deadline", "Days Left"]])
 
     st.divider()
     
-    # --- MASTER TABLE ---
-    st.subheader("Master Docket List")
+    # MASTER LIST (READ ONLY)
+    st.subheader("Master Docket List (Read-Only)")
     
-    # Prepare the dataframe for the editor with formatted strings
-    display_df = df.copy()
-    display_df['Event Date'] = display_df['Event Date'].apply(lambda x: x.strftime(DATE_FORMAT))
-    display_df['Form-3'] = display_df['Form-3'].apply(lambda x: x.strftime(DATE_FORMAT) if x != "N/A" else "N/A")
-    display_df['Final Deadline'] = display_df['Final Deadline'].apply(lambda x: x.strftime(DATE_FORMAT))
+    # Formatted display
+    disp = df.copy()
+    disp['Event Date'] = disp['Event Date'].apply(lambda x: x.strftime(DATE_FORMAT))
+    disp['Form-3'] = disp['Form-3'].apply(lambda x: x.strftime(DATE_FORMAT) if hasattr(x, 'strftime') else x)
+    disp['Final Deadline'] = disp['Final Deadline'].apply(lambda x: x.strftime(DATE_FORMAT))
     
-    edited_df = st.data_editor(display_df, num_rows="dynamic", use_container_width=True, key="main_editor")
-    
-    if st.button("Save Changes"):
-        # Convert strings back to dates to save properly
-        edited_df['Event Date'] = pd.to_datetime(edited_df['Event Date'], format=DATE_FORMAT).dt.date
-        edited_df['Final Deadline'] = pd.to_datetime(edited_df['Final Deadline'], format=DATE_FORMAT).dt.date
-        # Note: Form-3 remains a mix of string/date, save_data handles it.
-        st.session_state.df = edited_df
-        save_data(edited_df)
-        st.toast("Database Updated!")
-        st.rerun()
+    # Using st.dataframe instead of data_editor makes it read-only
+    st.dataframe(disp, use_container_width=True, hide_index=True)
 else:
     st.info("No data found. Add an entry in the sidebar.")
