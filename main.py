@@ -21,6 +21,10 @@ def load_data():
 
 def save_data(df):
     save_df = df.copy()
+    # Drop temporary display columns before saving to CSV if they exist
+    columns_to_drop = ['Days Left', 'Form-3 Days Left']
+    save_df = save_df.drop(columns=[col for col in columns_to_drop if col in save_df.columns])
+    
     # Format all dates to DD-MMM-YYYY before writing to CSV
     save_df['Event Date'] = save_df['Event Date'].apply(lambda x: x.strftime(DATE_FORMAT))
     save_df['Final Deadline'] = save_df['Final Deadline'].apply(lambda x: x.strftime(DATE_FORMAT))
@@ -29,7 +33,8 @@ def save_data(df):
 
 def get_dates(notice_type, d):
     if notice_type == "FER":
-        f3 = d + relativedelta(months=3) - timedelta(days=5)
+        # UPDATED: Exactly 3 months from the event date
+        f3 = d + relativedelta(months=3)
         final = d + relativedelta(months=6)
         return f3, final
     return "N/A", d + timedelta(days=15)
@@ -91,14 +96,29 @@ if not df.empty:
     today = datetime.now().date()
     df['Days Left'] = df['Final Deadline'].apply(lambda x: (x - today).days)
     
+    # NEW: Calculate days left specifically for Form-3 if it is a valid date
+    df['Form-3 Days Left'] = df['Form-3'].apply(lambda x: (x - today).days if not isinstance(x, str) else None)
+    
     # --- URGENT ALERTS ---
-    urgent = df[(df['Days Left'] <= 7) & (df['Status'] == "Pending")]
-    if not urgent.empty:
-        st.error(f"⚠️ {len(urgent)} Deadlines due within 7 days!")
-        # Formatting dates specifically for the Alert table
-        alert_disp = urgent.copy()
-        alert_disp['Final Deadline'] = alert_disp['Final Deadline'].apply(lambda x: x.strftime(DATE_FORMAT))
-        st.table(alert_disp[["Docket", "Final Deadline", "Days Left"]])
+    col_alert1, col_alert2 = st.columns(2)
+    
+    with col_alert1:
+        # Final Deadline Alerts
+        urgent_final = df[(df['Days Left'] <= 7) & (df['Status'] == "Pending")]
+        if not urgent_final.empty:
+            st.error(f"⚠️ {len(urgent_final)} Final Deadlines due within 7 days!")
+            alert_disp = urgent_final.copy()
+            alert_disp['Final Deadline'] = alert_disp['Final Deadline'].apply(lambda x: x.strftime(DATE_FORMAT))
+            st.table(alert_disp[["Docket", "Final Deadline", "Days Left"]])
+            
+    with col_alert2:
+        # NEW: Form-3 Alerts (Triggered 1 week / 7 days before Form-3 due date)
+        urgent_f3 = df[(df['Form-3 Days Left'] >= 0) & (df['Form-3 Days Left'] <= 7) & (df['Status'] == "Pending")]
+        if not urgent_f3.empty:
+            st.warning(f"⏳ {len(urgent_f3)} Form-3 Deadlines due within 7 days!")
+            f3_disp = urgent_f3.copy()
+            f3_disp['Form-3'] = f3_disp['Form-3'].apply(lambda x: x.strftime(DATE_FORMAT))
+            st.table(f3_disp[["Docket", "Form-3", "Form-3 Days Left"]])
 
     st.divider()
     
@@ -111,6 +131,8 @@ if not df.empty:
     disp['Form-3'] = disp['Form-3'].apply(lambda x: x.strftime(DATE_FORMAT) if hasattr(x, 'strftime') else x)
     disp['Final Deadline'] = disp['Final Deadline'].apply(lambda x: x.strftime(DATE_FORMAT))
     
-    st.dataframe(disp, use_container_width=True, hide_index=True)
+    # Clean up display columns for the master table view
+    disp_cols = ["Docket", "Type", "Event Date", "Form-3", "Final Deadline", "Status"]
+    st.dataframe(disp[disp_cols], use_container_width=True, hide_index=True)
 else:
     st.info("No data found. Add an entry in the sidebar.")
